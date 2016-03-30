@@ -1,0 +1,101 @@
+WITH employers_users AS(
+	SELECT
+		CAST(
+			associations."users" #>> '{participant}' AS uuid
+		) AS participant
+	FROM
+		associations,
+		users
+	WHERE
+		CAST(
+			associations.users #>> '{employer}' AS uuid
+		) = users.user_id
+	AND(users.display_name = <Parameters.Employer>)
+),
+ completedWC AS(
+	SELECT DISTINCT
+		user_id,
+		e.start_date AS call_date
+	FROM
+		event_attendees ea JOIN events e ON e.id = ea.event_id
+		INNER JOIN employers_users e_u ON ea.user_id = e_u.participant
+	WHERE
+		e.type = 'welcome_call' AND
+		e.status = 'completed' AND 
+		e.deleted_at is null AND 
+		ea.deleted_at is null
+),dataCoachingRaw AS(
+	SELECT DISTINCT
+		ea.user_id,
+		ev. TYPE,
+		ev.status,
+		ev.start_date AS DATE
+	FROM
+		events ev
+	JOIN event_attendees ea ON ev. ID = ea.event_id
+	JOIN employers_users eu ON eu.participant = ea.user_id,
+        completedWC
+	WHERE
+	(ev. TYPE = 'coaching_session' OR ev. TYPE ilike 'genetic_reveal_%' OR ev. TYPE = 'program_orientation')
+	AND ev.status = 'completed'
+        AND completedWC.user_id = ea.user_id
+        AND ea.deleted_at is null
+        AND ev.deleted_at is null
+),
+ dataCoachingMonth AS(
+	SELECT DISTINCT
+		user_id,
+                to_char(DATE, 'yyyy-mm') AS MONTH,
+                COUNT(TYPE) AS COUNT,
+                (
+                        CASE
+                        WHEN(COUNT(TYPE) >= 0) THEN
+                                1
+                        ELSE
+                                0
+                        END
+                ) AS CoachTracking,
+                (
+                        CASE
+                        WHEN(COUNT(TYPE) >= 2) THEN
+                                1
+                        ELSE
+                                0
+                        END
+                ) AS CoachTrackingGood
+		
+	FROM
+		dataCoachingRaw
+	WHERE
+		TYPE = 'coaching_session'
+	AND status = 'completed'
+	GROUP BY
+		user_id,
+		to_char(DATE, 'yyyy-mm')
+	ORDER BY
+		user_id
+),emails AS(
+	SELECT DISTINCT ON (ue.user_id)
+	    ue.user_id as user_id,
+	    ue.email as email
+	from completedWC au join user_emails ue on au.user_id = ue.user_id
+	where 
+        ue.deleted_at is null
+	order by ue.user_id, ue.created_at DESC
+),inspirators AS(
+	SELECT DISTINCT ON (ue.user_id, inspirator)
+	    ue.user_id as user_id,
+	    r.meta #>> '{first_name}' as firstName,
+	    r.meta #>> '{last_name}' as lastName,
+	    ue.email as email,
+	    (select display_name from users where user_id = (a.users #>> '{coach}')::uuid) as inspirator
+	from completedWC au join user_emails ue on au.user_id = ue.user_id
+			  join records r on au.user_id = r.user_id  
+			  join associations a on au.user_id = (a.users #>> '{participant}')::uuid
+	where 
+	    r.entity_id in (select id from entities where name = 'Intake') AND
+	    a.type = 'coach:participant' AND a.deleted_at is null AND r.deleted_at is null and ue.deleted_at is null
+	order by ue.user_id, inspirator, ue.created_at DESC, a.created_at DESC
+) 
+SELECT dm.*, ins.firstName, ins.lastName, ins.email, ins.inspirator
+FROM dataCoachingMonth dm join inspirators ins on dm.user_id = ins.user_id
