@@ -1,0 +1,37 @@
+WITH employers_users AS(
+	SELECT
+		CAST(
+			associations."users" #>> '{participant}' AS uuid
+		) AS user_id
+	FROM
+		associations,
+		users
+	WHERE
+		CAST(
+			associations.users #>> '{employer}' AS uuid
+		) = users.user_id
+	AND(users.display_name = <Parameters.Employer>)
+),completedWC AS(
+	SELECT DISTINCT
+		ea.user_id,
+		e.start_date AS call_date
+	FROM
+		event_attendees ea JOIN events e ON e.id = ea.event_id
+		INNER JOIN employers_users e_u ON ea.user_id = e_u.user_id
+	WHERE
+		e.type = 'welcome_call' AND
+		e.status = 'completed' AND 
+		e.deleted_at is null AND 
+		ea.deleted_at is null
+),
+sources  as (
+select 
+    r.meta #>> '{source}' as source,
+    r.user_id,
+    to_char(r.created_at, 'yyyy-ww') AS week
+from records r, completedWC eu
+where 
+    r.meta #>> '{source}' != '' AND r.meta #>> '{source}' != 'assessment' AND r.meta #>> '{source}' != 'body_trace'
+    AND r.user_id IN (eu.user_id)
+)
+select distinct * from sources
