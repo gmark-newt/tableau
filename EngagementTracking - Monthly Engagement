@@ -445,7 +445,7 @@ AND ev.deleted_at IS NULL
 		) AS "trackingto7%",
 		(
 			CASE
-			WHEN(weight_change < "7%_goal") THEN
+			WHEN(weight_change <= "7%_goal") THEN
 				1
 			ELSE
 				0
