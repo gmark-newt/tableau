@@ -1,0 +1,46 @@
+WITH intake AS (
+         SELECT
+                 *
+         FROM
+                 records r
+         WHERE
+                 r.entity_id IN (select id from entities where name = 'Intake' AND deleted_at IS NULL)
+                 AND r.deleted_at IS NULL
+ ), employer AS (
+         select
+                 u.display_name
+                 ,(a.users ->> 'participant')::UUID user_id
+         from
+                 associations a
+                 INNER JOIN users u ON u.user_id = (a.users ->> 'employer')::UUID
+         where
+                 type = 'participant:employer'
+                 AND a.deleted_at IS NULL
+                 AND u.deleted_at IS NULL
+ )
+  
+ SELECT
+         i.meta #>> '{first_name}' first_name
+         ,i.meta #>> '{last_name}' last_name
+         ,i.meta #>> '{member_id}' member_id
+         ,i.meta #>> '{date_of_birth}' dob
+         ,e.display_name employer_name
+         --,*
+ FROM
+         users u
+         INNER JOIN intake i ON i.user_id = u.user_id
+         INNER JOIN employer e ON e.user_id = u.user_id
+ WHERE
+         u.user_id NOT IN (
+                 SELECT
+                         user_id
+                 FROM
+                         records r
+                 WHERE
+                         r.entity_id IN (select id from entities where name = 'Registration' AND deleted_at IS NULL)
+                          AND r.deleted_at IS NULL
+                 
+         )
+         -- Filter by employer
+         AND e.display_name = <Parameters.Employer>
+ ORDER BY u.id
