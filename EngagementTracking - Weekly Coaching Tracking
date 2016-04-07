@@ -1,0 +1,524 @@
+WITH employers_users AS(
+	SELECT
+		CAST(
+			associations."users" #>> '{participant}' AS uuid
+		) AS participant
+	FROM
+		associations,
+		users
+	WHERE
+		CAST(
+			associations.users #>> '{employer}' AS uuid
+		) = users.user_id
+	AND(users.display_name = <Parameters.Employer>)
+),
+ completedWC AS(
+	SELECT DISTINCT
+		user_id,
+		e.start_date AS call_date
+	FROM
+		event_attendees ea
+	JOIN events e ON e. ID = ea.event_id
+	INNER JOIN employers_users e_u ON ea.user_id = e_u.participant
+	WHERE
+		e. TYPE = 'welcome_call'
+	AND e.status = 'completed'
+	AND e.deleted_at IS NULL
+	AND ea.deleted_at IS NULL
+),
+ dataCoachingRaw AS(
+	SELECT DISTINCT
+		ea.user_id,
+		ev. TYPE,
+		ev.status,
+		ev.start_date AS DATE
+	FROM
+		events ev
+	JOIN event_attendees ea ON ev. ID = ea.event_id
+	JOIN employers_users eu ON eu.participant = ea.user_id,
+	completedWC
+WHERE
+	(
+		ev. TYPE = 'coaching_session'
+		OR ev. TYPE ILIKE 'genetic_reveal_%'
+		OR ev. TYPE = 'program_orientation'
+	)
+AND ev.status = 'completed'
+AND completedWC.user_id = ea.user_id
+AND ea.deleted_at IS NULL
+AND ev.deleted_at IS NULL
+),
+ dataCoachingWeek AS(
+	SELECT DISTINCT
+		user_id,
+		to_char(DATE, 'yyyy-ww') AS WEEK,
+		COUNT(TYPE) AS COUNT
+	FROM
+		dataCoachingRaw
+	WHERE
+		TYPE = 'coaching_session'
+	AND status = 'completed'
+	GROUP BY
+		user_id,
+		to_char(DATE, 'yyyy-ww')
+	ORDER BY
+		user_id
+),
+ user_records_raw AS(
+	SELECT DISTINCT
+		records.user_id,
+		types. NAME AS type_name,
+		records.created_at AS DATE,
+		entities. NAME AS entity_name
+	FROM
+		records,
+		types,
+		entities,
+		completedWC
+	WHERE
+		types. ID = records.type_id
+	AND entities. ID = records.entity_id
+	AND completedWC.user_id = records.user_id
+	AND(
+		types. NAME = 'food'
+		OR types. NAME = 'exercise'
+		OR types. NAME = 'water'
+		OR types. NAME = 'wellbeing'
+		OR(
+			records.entity_id =(
+				SELECT
+					ID
+				FROM
+					entities
+				WHERE
+					NAME = 'Weight'
+			)
+			AND records.meta #>> '{source}' = 'body_trace'
+		)
+		OR records.entity_id =(
+			SELECT
+				ID
+			FROM
+				entities
+			WHERE
+				NAME = 'Challenge'
+		)
+	)
+	AND records.user_id IN(
+		SELECT
+			participant
+		FROM
+			employers_users
+	)
+	AND records.deleted_at IS NULL
+),
+ user_records_red0 AS(
+	SELECT
+		user_id,
+		(
+			CASE
+			WHEN(
+				type_name = 'food'
+				OR type_name = 'water'
+			) THEN
+				'nutrition'
+			WHEN(entity_name = 'Weight') THEN
+				'weight'
+			WHEN(entity_name = 'Challenge') THEN
+				'challenge'
+			ELSE
+				type_name
+			END
+		) AS type_name,
+		DATE
+	FROM
+		user_records_raw
+),
+ dataNutritionDay AS(
+	SELECT DISTINCT
+		user_id,
+		type_name,
+		to_date(
+			to_char(DATE, 'yyyy-mm-dd'),
+			'yyyy-mm-dd'
+		) AS DATE
+	FROM
+		user_records_red0
+	WHERE
+		type_name = 'nutrition'
+),
+ dataNutritionWeek AS(
+	SELECT DISTINCT
+		user_id,
+		COUNT(type_name) AS COUNT,
+		to_char(DATE, 'yyyy-ww') AS WEEK
+	FROM
+		dataNutritionDay
+	WHERE
+		type_name = 'nutrition'
+	GROUP BY
+		user_id,
+		to_char(DATE, 'yyyy-ww')
+	ORDER BY
+		user_id
+),
+ dataExerciseDay AS(
+	SELECT DISTINCT
+		user_id,
+		type_name,
+		to_date(
+			to_char(DATE, 'yyyy-mm-dd'),
+			'yyyy-mm-dd'
+		) AS DATE
+	FROM
+		user_records_red0
+	WHERE
+		type_name = 'exercise'
+),
+ dataExerciseWeek AS(
+	SELECT DISTINCT
+		user_id,
+		COUNT(type_name) AS COUNT,
+		to_char(DATE, 'yyyy-ww') AS WEEK
+	FROM
+		dataExerciseDay
+	WHERE
+		type_name = 'exercise'
+	GROUP BY
+		user_id,
+		to_char(DATE, 'yyyy-ww')
+	ORDER BY
+		user_id
+),
+ dataWeightDay AS(
+	SELECT DISTINCT
+		user_id,
+		type_name,
+		to_date(
+			to_char(DATE, 'yyyy-mm-dd'),
+			'yyyy-mm-dd'
+		) AS DATE
+	FROM
+		user_records_red0
+	WHERE
+		type_name = 'weight'
+),
+ dataWeightWeek AS(
+	SELECT DISTINCT
+		user_id,
+		COUNT(type_name) AS COUNT,
+		to_char(DATE, 'yyyy-ww') AS WEEK
+	FROM
+		dataWeightDay
+	WHERE
+		type_name = 'weight'
+	GROUP BY
+		user_id,
+		to_char(DATE, 'yyyy-ww')
+	ORDER BY
+		user_id
+),
+ emails AS(
+	SELECT DISTINCT
+		ON(ue.user_id) ue.user_id AS user_id,
+		ue.email AS email
+	FROM
+		completedWC au
+	JOIN user_emails ue ON au.user_id = ue.user_id
+	WHERE
+		ue.deleted_at IS NULL
+	ORDER BY
+		ue.user_id,
+		ue.created_at DESC
+),
+ inspirators AS(
+	SELECT DISTINCT
+		ON(ue.user_id, inspirator) ue.user_id AS user_id,
+		r.meta #>> '{first_name}' AS firstName,
+		r.meta #>> '{last_name}' AS lastName,
+		ue.email AS email,
+		(
+			SELECT
+				display_name
+			FROM
+				users
+			WHERE
+				user_id =(A .users #>> '{coach}') :: uuid
+		) AS inspirator
+	FROM
+		completedWC au
+	JOIN user_emails ue ON au.user_id = ue.user_id
+	JOIN records r ON au.user_id = r.user_id
+	JOIN associations A ON au.user_id =(A .users #>> '{participant}') :: uuid
+	WHERE
+		r.entity_id IN(
+			SELECT
+				ID
+			FROM
+				entities
+			WHERE
+				NAME = 'Intake'
+		)
+	AND A . TYPE = 'coach:participant'
+	AND A .deleted_at IS NULL
+	AND r.deleted_at IS NULL
+	AND ue.deleted_at IS NULL
+	ORDER BY
+		ue.user_id,
+		inspirator,
+		ue.created_at DESC,
+		A .created_at DESC
+),
+ "program_week" AS(
+	SELECT
+		ROW_NUMBER() OVER(ORDER BY DATE) AS ID,
+		DATE "start_date",
+		DATE + '7 days' :: INTERVAL "end_date"
+	FROM
+		generate_series(
+			'2015-10-06 00:00' :: TIMESTAMP,
+			now() :: TIMESTAMP,
+			'7 days'
+		) AS DATE
+),
+ "raw_weight" AS(
+	SELECT
+		wr.user_id,
+		CAST(
+			wr.measure_data #>> '{weight,value}' AS FLOAT
+		) AS
+	VALUE
+		,
+		wr.measure_data #>> '{weight,unit}' AS unit,
+		wr.created_at,
+		wr.record_at,
+		to_char(wr.created_at, 'YYYY-WW') AS week,
+		wr.meta #>> '{source}' AS SOURCE
+	FROM
+		completedWC ps
+	LEFT JOIN records wr ON wr.user_id = ps.user_id
+	AND wr.entity_id =(
+		SELECT
+			ID
+		FROM
+			entities
+		WHERE
+			NAME = 'Weight'
+	)
+	AND wr.deleted_at IS NULL
+),
+ "raw2" AS(
+	SELECT
+		pw. ID AS program_week,
+		pw.start_date,
+		pw.end_date,
+		SOURCE,
+		rw.user_id,
+		rw.record_at AS record_at,
+		rw.week,
+		rw.
+	VALUE
+		AS
+	VALUE
+		,
+		COUNT(rw. VALUE) OVER(PARTITION BY rw.user_id)
+	FROM
+		program_week pw
+	JOIN raw_weight rw ON rw.record_at >= pw.start_date
+	AND rw.record_at < pw.end_date
+	ORDER BY
+		program_week ASC
+),
+ "weight_week" AS(
+	SELECT
+		raw2.user_id,
+		COUNT,
+
+	VALUE
+		,
+		record_at,
+		program_week,
+		MIN(program_week) OVER(PARTITION BY raw2.user_id) AS baseline_weight_week,
+		MAX(program_week) OVER(PARTITION BY raw2.user_id) AS last_week,
+		SOURCE
+	FROM
+		"raw2"
+	ORDER BY
+		user_id,
+		program_week
+),
+ "initial_weight" AS(
+	SELECT
+		user_id,
+		MAX(VALUE) OVER(PARTITION BY user_id) AS baseline_weight
+	FROM
+		weight_week
+	WHERE
+		program_week = baseline_weight_week
+),
+ "week_min_weight" AS(
+	SELECT DISTINCT
+		ON(user_id, program_week) *, MIN(VALUE) OVER(
+			PARTITION BY user_id,
+			program_week
+		) AS min_weight
+	FROM
+		weight_week
+	ORDER BY
+		user_id,
+		program_week
+),
+ "last_weight" AS(
+	SELECT DISTINCT
+		user_id,
+		program_week,
+		min_weight,
+		LAG(min_weight) OVER(PARTITION BY user_id) AS last_weight
+	FROM
+		week_min_weight
+	ORDER BY
+		user_id,
+		program_week
+),
+ "data" AS(
+	SELECT DISTINCT
+		ON(
+			weight_week.user_id,
+			weight_week.program_week
+		) weight_week.user_id,
+		SOURCE,
+		COUNT,
+
+	VALUE
+		,
+		record_at,
+		baseline_weight_week,
+		weight_week.program_week,
+		last_week,
+		baseline_weight,
+		last_weight ,- baseline_weight * 0.07 AS "7%_goal",
+		(VALUE - baseline_weight) AS weight_change
+	FROM
+		weight_week
+	LEFT JOIN initial_weight ON initial_weight.user_id = weight_week.user_id
+	LEFT JOIN last_weight ON last_weight.user_id = weight_week.user_id
+	AND last_weight.program_week = weight_week.program_week
+	ORDER BY
+		weight_week.user_id,
+		weight_week.program_week
+),
+ total_data AS(
+	SELECT
+		user_id,
+		COUNT,
+		SOURCE,
+
+	VALUE
+		,
+		record_at,
+		to_char(record_at, 'yyyy-ww') AS WEEK,
+		baseline_weight_week,
+		program_week,
+		baseline_weight,
+		last_weight,
+		weight_change,
+		last_week,
+		(
+			CASE
+			WHEN(last_week = baseline_weight_week) THEN
+				0
+			ELSE
+				(
+					weight_change /(last_week - baseline_weight_week)
+				)
+			END
+		) AS week_change_rate,
+		(
+			CASE
+			WHEN(
+				- weight_change >= 0.0013 * baseline_weight
+			) THEN
+				1
+			ELSE
+				0
+			END
+		) AS "trackingto7%",
+		(
+			CASE
+			WHEN(weight_change <= "7%_goal") THEN
+				1
+			ELSE
+				0
+			END
+		) AS "achieved7%"
+	FROM
+		DATA
+	WHERE
+		-- 		record_at < < Parameters .end_date >
+		-- 	and record_at >= < Parameters .start_date >
+		--and 
+		user_id IN(SELECT user_id FROM completedWC)
+	ORDER BY
+		user_id,
+		program_week
+),
+ dataTrackingWeek AS(
+	SELECT DISTINCT
+		ON(user_id, WEEK) user_id,
+		WEEK,
+		(
+			CASE
+			WHEN SUM("trackingto7%") > 0 THEN
+				TRUE
+			ELSE
+				FALSE
+			END
+		) AS tracking
+	FROM
+		total_data
+	GROUP BY
+		user_id,
+		WEEK
+	ORDER BY
+		user_id,
+		WEEK
+) SELECT
+	dm.user_id,
+	dm. WEEK AS WEEK,
+	dm. COUNT AS coaching_sessions,
+	dnm. COUNT AS nutrition,
+	dem. COUNT AS exercise,
+	dwm. COUNT AS weight,
+	dtm.tracking AS "trackingTo7%",
+	ins.firstName,
+	ins.lastName,
+	ins.email,
+	ins.inspirator
+FROM
+	dataCoachingWeek dm
+JOIN inspirators ins ON dm.user_id = ins.user_id
+FULL OUTER JOIN dataNutritionWeek dnm ON dm.user_id = dnm.user_id
+AND dm. WEEK = dnm. WEEK
+FULL OUTER JOIN dataExerciseWeek dem ON dm.user_id = dem.user_id
+AND dm. WEEK = dem. WEEK
+FULL OUTER JOIN dataWeightWeek dwm ON dm.user_id = dwm.user_id
+AND dm. WEEK = dwm. WEEK
+FULL OUTER JOIN dataTrackingWeek dtm ON dm.user_id = dtm.user_id
+AND dm. WEEK = dtm. WEEK
+WHERE
+	dm. COUNT IS NOT NULL
+GROUP BY
+	dm.user_id,
+	dm. WEEK,
+	ins.firstName,
+	ins.lastName,
+	ins.email,
+	ins.inspirator,
+	dm. COUNT,
+	dnm. COUNT,
+	dem. COUNT,
+	dwm. COUNT,
+	dtm.tracking
+ORDER BY
+        dm.user_id,
+        dm.WEEK
