@@ -69,7 +69,8 @@ AND ev.deleted_at IS NULL
 		records.user_id,
 		types. NAME AS type_name,
 		records.created_at AS DATE,
-		entities. NAME AS entity_name
+		entities. NAME AS entity_name,
+                records.meta #>> '{source}' AS SOURCE
 	FROM
 		records,
 		types,
@@ -93,7 +94,6 @@ AND ev.deleted_at IS NULL
 				WHERE
 					NAME = 'Weight'
 			)
-			AND records.meta #>> '{source}' = 'body_trace'
 		)
 		OR records.entity_id =(
 			SELECT
@@ -130,9 +130,12 @@ AND ev.deleted_at IS NULL
 				type_name
 			END
 		) AS type_name,
-		DATE
+		DATE,
+                source
 	FROM
 		user_records_raw
+        WHERE 
+                source is null OR source != 'assessment'
 ),
  dataNutritionDay AS(
 	SELECT DISTINCT
@@ -287,7 +290,7 @@ AND ev.deleted_at IS NULL
 		CAST(
 			wr.measure_data #>> '{weight,value}' AS FLOAT
 		) AS
-	VALUE
+                VALUE
 		,
 		wr.measure_data #>> '{weight,unit}' AS unit,
 		wr.created_at,
@@ -303,8 +306,8 @@ AND ev.deleted_at IS NULL
 		FROM
 			entities
 		WHERE
-			NAME = 'Weight'
-	)
+			NAME = 'Weight')
+	
 	AND wr.deleted_at IS NULL
 ),
  "raw2" AS(
@@ -326,6 +329,8 @@ AND ev.deleted_at IS NULL
 		program_week pw
 	JOIN raw_weight rw ON rw.record_at >= pw.start_date
 	AND rw.record_at < pw.end_date
+        WHERE
+            source is null OR source != 'assessment'
 	ORDER BY
 		program_week ASC
 ),
@@ -358,24 +363,16 @@ AND ev.deleted_at IS NULL
 ),
  "week_min_weight" AS(
 	SELECT DISTINCT
-		ON(user_id, program_week) *, MIN(VALUE) OVER(
+		ON(user_id, program_week) 
+                user_id,
+                program_week,
+                MIN(VALUE) OVER(
 			PARTITION BY user_id,
 			program_week
-		) AS min_weight
+		) AS last_weight
+ 
 	FROM
 		weight_week
-	ORDER BY
-		user_id,
-		program_week
-),
- "last_weight" AS(
-	SELECT DISTINCT
-		user_id,
-		program_week,
-		min_weight,
-		LAG(min_weight) OVER(PARTITION BY user_id) AS last_weight
-	FROM
-		week_min_weight
 	ORDER BY
 		user_id,
 		program_week
@@ -397,12 +394,12 @@ AND ev.deleted_at IS NULL
 		last_week,
 		baseline_weight,
 		last_weight ,- baseline_weight * 0.07 AS "7%_goal",
-		(VALUE - baseline_weight) AS weight_change
+		(last_weight - baseline_weight) AS weight_change
 	FROM
 		weight_week
 	LEFT JOIN initial_weight ON initial_weight.user_id = weight_week.user_id
-	LEFT JOIN last_weight ON last_weight.user_id = weight_week.user_id
-	AND last_weight.program_week = weight_week.program_week
+	LEFT JOIN week_min_weight ON week_min_weight.user_id = weight_week.user_id
+	AND week_min_weight.program_week = weight_week.program_week
 	ORDER BY
 		weight_week.user_id,
 		weight_week.program_week
@@ -482,43 +479,38 @@ AND ev.deleted_at IS NULL
 	ORDER BY
 		user_id,
 		WEEK
-) SELECT
+)
+SELECT DISTINCT 
 	dm.user_id,
-	dm. WEEK AS WEEK,
-	dm. COUNT AS coaching_sessions,
-	dnm. COUNT AS nutrition,
-	dem. COUNT AS exercise,
-	dwm. COUNT AS weight,
+	dm.week,
+	dcm.COUNT AS coaching_sessions,
+	dm.COUNT AS nutrition,
+	dem.COUNT AS exercise,
+	dwm.COUNT AS weight,
 	dtm.tracking AS "trackingTo7%",
 	ins.firstName,
 	ins.lastName,
 	ins.email,
 	ins.inspirator
 FROM
-	dataCoachingWeek dm
+dataNutritionWeek dm
 JOIN inspirators ins ON dm.user_id = ins.user_id
-FULL OUTER JOIN dataNutritionWeek dnm ON dm.user_id = dnm.user_id
-AND dm. WEEK = dnm. WEEK
-FULL OUTER JOIN dataExerciseWeek dem ON dm.user_id = dem.user_id
-AND dm. WEEK = dem. WEEK
-FULL OUTER JOIN dataWeightWeek dwm ON dm.user_id = dwm.user_id
-AND dm. WEEK = dwm. WEEK
-FULL OUTER JOIN dataTrackingWeek dtm ON dm.user_id = dtm.user_id
-AND dm. WEEK = dtm. WEEK
-WHERE
-	dm. COUNT IS NOT NULL
+LEFT JOIN dataCoachingWeek dcm ON dm.user_id = dcm.user_id and dm.week = dcm.week
+LEFT JOIN dataExerciseWeek dem ON dm.user_id = dem.user_id and dm.week = dem.week
+LEFT JOIN dataWeightWeek dwm ON dm.user_id = dwm.user_id and dm.week = dwm.week
+LEFT JOIN dataTrackingWeek dtm ON dm.user_id = dtm.user_id and dm.week = dtm.week
 GROUP BY
 	dm.user_id,
-	dm. WEEK,
+        dm.week,
 	ins.firstName,
 	ins.lastName,
 	ins.email,
 	ins.inspirator,
 	dm. COUNT,
-	dnm. COUNT,
+	dcm. COUNT,
 	dem. COUNT,
 	dwm. COUNT,
 	dtm.tracking
 ORDER BY
         dm.user_id,
-        dm.WEEK
+        dm.week
