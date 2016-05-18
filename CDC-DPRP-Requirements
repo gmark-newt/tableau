@@ -199,7 +199,7 @@ order by result_name asc
 	ORDER BY r.user_id, r.created_at DESC
 ), totalRequirements as (
 
-	SELECT DISTINCT ON(session_type, date)
+	SELECT
 		sd.user_id as user_id,
 		st.state as state,
 		fl.blood_glucose_test as blood_glucose_test,
