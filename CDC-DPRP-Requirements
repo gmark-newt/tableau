@@ -150,6 +150,20 @@ order by result_name asc
 	FROM
 		records r INNER JOIN types ON types. ID = r.type_id AND types. NAME = 'exercise'
 			INNER JOIN final_labs fl ON r.user_id = fl.user_id
+),exerciseSum as(
+    SELECT user_id, 
+        sum(exercise_minutes) as totalweekexercise, 
+        week
+    from exercise 
+    group by user_id, week
+    ORDER BY user_id
+), previousWeekExercise as (
+    SELECT user_id, 
+        totalweekexercise, 
+        week as realWeek,
+        to_char(to_date(week,'YYYY-WW') + interval '1 week', 'YYYY-WW')  as compareWeek
+    from exerciseSum 
+    ORDER BY user_id
 ),  sessionData as (
 
 	SELECT	
@@ -159,9 +173,9 @@ order by result_name asc
 		cr.date,
 		cr.week,
 		mw.last_weight,
-		ex.exercise_minutes
+		ex.totalweekexercise
 	FROM dataCoachingRaw cr LEFT JOIN week_min_weight mw ON cr.week = mw.week AND cr.user_id = mw.user_id
-				LEFT JOIN exercise ex ON cr.week = ex.week AND cr.user_id = ex.user_id
+				LEFT JOIN previousWeekExercise ex ON cr.week = ex.compareWeek AND cr.user_id = ex.user_id
 
 ), assessment as(
 	SELECT DISTINCT ON(r.user_id) r.user_id,
@@ -209,7 +223,7 @@ order by result_name asc
 		sd.date as date,
 		sd.week as week,
 		sd.last_weight as week_weight,
-		sd.exercise_minutes as exercise_minutes,
+		sd.totalweekexercise as last_week_exercise_minutes,
 		ass.meds_diabetes as meds_diabetes
 	FROM sessionData sd LEFT JOIN state st ON sd.user_id = st.user_id
 			LEFT JOIN assessment ass ON sd.user_id = ass.user_id
