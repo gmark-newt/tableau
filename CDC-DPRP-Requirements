@@ -1,0 +1,219 @@
+WITH "glucose_ppl" AS(
+	SELECT DISTINCT
+		ON(pp.user_id) lt.loinc,
+		pp.user_id
+	FROM
+		newtopia_intake_lab_tests lt
+	INNER JOIN newtopia_intake_persons pp ON pp. ID = lt.person_id
+	AND pp.user_id IS NOT NULL
+	WHERE
+		lt.loinc = '1554-5' AND lt.deleted_at is null 
+),
+ "ac1_ppl" AS(
+	SELECT DISTINCT
+		ON(pp.user_id) lt.loinc,
+		pp.user_id
+	FROM
+		newtopia_intake_lab_tests lt
+	INNER JOIN newtopia_intake_persons pp ON pp. ID = lt.person_id
+	AND pp.user_id IS NOT NULL
+	WHERE
+		lt.loinc = '4548-4' AND lt.deleted_at is null
+), "participants" as ( SELECT
+	*
+FROM
+	participantstatus
+WHERE
+	employer IN('Wawa', 'Aetna')
+AND (user_id IN(SELECT user_id FROM glucose_ppl) OR user_id IN(SELECT user_id FROM ac1_ppl))
+), "raw_labs" as (
+
+ select p.user_id,
+        lt.loinc,
+        lt.value,
+        lt.meta #>> '{result_name}' as result_name,
+        lt.meta #>> '{unit}' as unit, 
+        ps.employer
+    from newtopia_intake_lab_tests lt 
+    inner join newtopia_intake_persons p on p.user_id is not null and p.id = lt.person_id
+    inner join participants ps on ps.user_id = p.user_id 
+
+), "filtered_labs" as (
+select user_id, employer, loinc, result_name, value, unit from raw_labs 
+where ( 
+	loinc = '1554-5' and value >= '100' and value <= '125'
+ )  or (
+	loinc = '4548-4' and value >= '5.7' and value <= '6.4'
+   )
+order by result_name asc
+
+),"clean_labs" as(
+	SELECT DISTINCT ON(user_id, value) user_id,
+	employer,
+	loinc,
+	CAST(VALUE AS FLOAT),
+	result_name,
+	unit,
+	(SELECT COUNT(*) FROM participants) AS "total" FROM filtered_labs
+), "glucose_labs" as(
+	SELECT DISTINCT ON(user_id) user_id,
+	employer,
+	loinc,
+	CAST(VALUE AS FLOAT),
+	result_name,
+	unit
+    from clean_labs
+	WHERE  result_name ilike 'Glucose' ORDER BY user_id
+), "a1c_labs" as(
+	SELECT DISTINCT ON(user_id) user_id,
+	employer,
+	loinc,
+	CAST(VALUE AS FLOAT),
+	result_name,
+	unit
+	from clean_labs
+	WHERE  result_name ilike 'Hemoglobin A1c' ORDER BY user_id
+), final_labs as (  
+	SELECT DISTINCT on(cl.user_id)
+	    cl.user_id,
+		gl.value as blood_glucose_test,
+		gl.result_name as blood_glucose_name,
+		gl.unit as blood_glucose_unit,
+		'N/A' as GDM_test,
+		al.value as hemoglobin_test,
+		al.result_name as hemoglobin_name,
+		al.unit as hemoglobin_unit
+		from clean_labs cl LEFT JOIN glucose_labs gl ON cl.user_id = gl.user_id
+		                      LEFT JOIN a1c_labs al ON cl.user_id = al.user_id
+), dataCoachingRaw AS(
+	SELECT DISTINCT
+		ea.user_id,
+		ev. TYPE,
+		ev.status,
+		ev.start_date AS raw_date,
+		to_char(ev.start_date, 'yyyy-mm-dd') AS date,
+		to_char(ev.start_date, 'yyyy-ww') AS WEEK
+	FROM
+		events ev
+	JOIN event_attendees ea ON ev. ID = ea.event_id
+	JOIN final_labs fl ON fl.user_id = ea.user_id
+	WHERE
+		(
+			ev. TYPE = 'coaching_session'
+			OR ev. TYPE ILIKE 'genetic_reveal_%'
+			OR ev. TYPE = 'program_orientation'
+			OR ev. TYPE = 'welcome_call'
+		)
+	AND ev.status = 'completed'
+	AND ea.deleted_at IS NULL
+	AND ev.deleted_at IS NULL
+), weight_records_raw AS(
+	SELECT
+		r.user_id,
+		to_char(r.created_at, 'yyyy-ww') AS week,
+		CAST(r.measure_data #>> '{weight,value}' as FLOAT) as weight,
+                r.measure_data #>> '{weight,unit}' as unit,
+                r.meta #>> '{source}' as source
+	FROM
+		records r JOIN final_labs fl ON r.user_id = fl.user_id
+	WHERE
+		r.entity_id =(
+			SELECT
+				ID
+			FROM
+				entities
+			WHERE
+				NAME = 'Weight'
+		)
+	AND r.deleted_at IS NULL
+), week_min_weight AS(
+	SELECT DISTINCT
+		ON(user_id, week) 
+                user_id,
+                week,
+                MIN(weight) OVER(
+			PARTITION BY user_id,
+			week
+		) AS last_weight
+ 
+	FROM
+		weight_records_raw
+	ORDER BY
+		user_id,
+		week
+), exercise as (SELECT
+	r.user_id,
+	CAST(
+		r.measure_data #>> '{time,value}' AS float
+	) AS exercise_minutes,
+	to_char( r.record_at, 'YYYY-WW') as week
+	FROM
+		records r INNER JOIN types ON types. ID = r.type_id AND types. NAME = 'exercise'
+			INNER JOIN final_labs fl ON r.user_id = fl.user_id
+),  sessionData as (
+
+	SELECT	
+		cr.user_id,
+		cr.type,
+		cr.status,
+		cr.date,
+		cr.week,
+		mw.last_weight,
+		ex.exercise_minutes
+	FROM dataCoachingRaw cr LEFT JOIN week_min_weight mw ON cr.week = mw.week AND cr.user_id = mw.user_id
+				LEFT JOIN exercise ex ON cr.week = ex.week AND cr.user_id = ex.user_id
+
+), assessment as(
+	SELECT DISTINCT ON(r.user_id) r.user_id,
+		r.meta #>> '{EthnicityRace, text}' as race,
+		r.meta #>> '{EthnicityRace, value}' as value,
+		r.meta #>> '{MedsDiabetes,text}' as meds_diabetes
+	FROM records r JOIN final_labs fl ON r.user_id = fl.user_id 
+	WHERE r.entity_id IN(SELECT ID FROM entities WHERE NAME = 'Assessment') AND r.deleted_at is null
+), state as (
+	SELECT DISTINCT ON(ua.user_id) ua.user_id,
+		ua.state
+	FROM user_addresses ua JOIN final_labs fl ON ua.user_id = fl.user_id 
+	WHERE ua.deleted_at is null
+	ORDER BY ua.user_id, ua.created_at DESC
+), intake_data as (
+	SELECT DISTINCT ON(r.user_id) r.user_id,
+		(select extract(year from age(now(), (r.meta #>> '{date_of_birth}')::timestamp))) as age,
+		r.meta #>> '{gender}' as gender
+	FROM records r JOIN final_labs fl ON r.user_id = fl.user_id 
+	WHERE r.entity_id IN(SELECT ID FROM entities WHERE NAME = 'Intake') AND r.deleted_at is null
+	ORDER BY r.user_id, r.created_at DESC
+), totalRequirements as (
+
+	SELECT DISTINCT ON(session_type, date)
+		sd.user_id as user_id,
+		st.state as state,
+		fl.blood_glucose_test as blood_glucose_test,
+		fl.blood_glucose_name as blood_glucose_name,
+		fl.blood_glucose_unit as blood_glucose_unit,
+		'N/A' as GDM_test,
+		fl.hemoglobin_test as hemoglobin_test,
+		fl.hemoglobin_name as hemoglobin_name,
+		fl.hemoglobin_unit as hemoglobin_unit,
+		ida.age as age,
+		CASE WHEN (ass.race::text) ilike '%Latino or Hispanic American%' THEN true ELSE false END as hispanic_or_latino,
+		CASE WHEN (ass.race::text) ilike '%American Indian or Alaskan Native%' THEN true ELSE false END as american_indian_or_alaska_native,
+		CASE WHEN (ass.race::text) ilike '%East Asian or Asian American%' THEN true ELSE false END as asian,
+		CASE WHEN ((ass.race::text) ilike '%Black%' or (ass.race::text) ilike '%African American%' or (ass.race::text) ilike '%Afro-Caribbean%') THEN true ELSE false END as black,
+		CASE WHEN (ass.race::text) ilike '%Native Hawaiian or other Pacific Islander%' THEN true ELSE false END as native_hawaiian_or_pacific,
+		CASE WHEN ((ass.race::text) ilike '%Caucasian%' or (ass.race::text) ilike '%Non-Hispanic White or Euro-American%') THEN true ELSE false END as white,
+		CASE WHEN (ass.race::text) ilike '%South Asian or Indian American%' THEN true ELSE false END as south_asian,
+		CASE WHEN (ass.race::text) ilike '%Middle Eastern or Arab American%' THEN true ELSE false END as middle_eastern,
+		ida.gender as gender,
+		sd.type as session_type,
+		sd.date as date,
+		sd.week as week,
+		sd.last_weight as week_weight,
+		sd.exercise_minutes as exercise_minutes,
+		ass.meds_diabetes as meds_diabetes
+	FROM sessionData sd LEFT JOIN state st ON sd.user_id = st.user_id
+			LEFT JOIN assessment ass ON sd.user_id = ass.user_id
+			LEFT JOIN intake_data ida ON sd.user_id = ida.user_id
+			LEFT JOIN final_labs fl ON sd.user_id = fl.user_id
+
+) select * from totalRequirements order by user_id, week
